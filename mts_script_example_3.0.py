@@ -34,7 +34,7 @@ def save_etl_log_id(log_file, etl_log_id):
 def append_to_log_file(etl_log_id, header_tstamp_first, station_name, test_file_name):
     log_filename = "etl_log.txt"  # Use a single log file
     with open(log_filename, 'a') as log_file:  # Open in append mode
-        timestamp_now = datetime.now().strftime("%Y-%m-%d_%a_%I.%M-%p")
+        timestamp_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         # Write all fields on the same line, separated by tabs
         log_file.write(f"{etl_log_id}\t{timestamp_now}\t{header_tstamp_first}\t{station_name}\t{test_file_name}\n")
 
@@ -52,29 +52,32 @@ def get_table_name_from_station(station_name):
         raise ValueError(f"Unrecognized station name: {station_name}")
 
 # Function to extract column names and metadata from the file
-def extract_columns_and_metadata(lines):
+def extract_columns_and_metadata(lines, last_line_processed):
     headers = []
     header_tstamp_first = None
     station_name = None
     test_file_name = None
     found_test_file = False
 
-    for i, line in enumerate(lines):
-        line = line.strip()  # Strip leading/trailing spaces
+    # Start from the last processed line
+    for i in range(last_line_processed, len(lines)):
+        line = lines[i].strip()
 
         if "Data Header:" in line:
-            # Extract the timestamp from the Data Header
+            # Extract the timestamp from the latest Data Header
             parts = line.split("\t")
             if len(parts) > 4:
-                header_tstamp_first = parts[-1].strip()  # Extract timestamp, assuming it's the last part
-                print(f"Extracted timestamp: {header_tstamp_first}")  # DEBUG
+                timestamp_from_file = parts[-1].strip()
+                # Convert to SQL format
+                parsed_timestamp = datetime.strptime(timestamp_from_file, "%m/%d/%Y %I:%M:%S %p")
+                header_tstamp_first = parsed_timestamp.strftime("%Y-%m-%d %H:%M:%S")
 
         elif "Station Name:" in line:
             station_name = line.split(":")[1].strip()
         elif "Test File Name:" in line:
             test_file_name = line.split(":")[1].strip()
             found_test_file = True  # After this, we expect the headers to be in the next line
-            continue  # Move to the next line
+            continue
 
         # If we just found the test file name, expect the next line to be the headers
         if found_test_file and not headers:
@@ -84,7 +87,11 @@ def extract_columns_and_metadata(lines):
 
     if not headers:
         print("Error: No valid headers found.")
+    
     return headers, header_tstamp_first, station_name, test_file_name
+
+
+
 
 
 # Function to process the .dat file and convert it into a pandas DataFrame
@@ -102,7 +109,7 @@ def process_data_file(input_file, last_line_processed, etl_log_id):
         print(f"Error reading file: {e}")
         return pd.DataFrame(), last_line_processed
 
-    headers, header_tstamp_first, station_name, test_file_name = extract_columns_and_metadata(lines)
+    headers, header_tstamp_first, station_name, test_file_name = extract_columns_and_metadata(lines, last_line_processed)
 
     if not headers:
         print("Error: No headers found in the file.")
@@ -119,9 +126,6 @@ def process_data_file(input_file, last_line_processed, etl_log_id):
     for i in range(last_line_processed, len(lines)):
         line = lines[i].strip()
 
-        # Debugging: show the first few lines being processed
-        if i < last_line_processed + 10:
-            print(f"Processing line {i}: {line}")  # DEBUG
 
         # Skip metadata sections until the data section begins
         if "Data Header:" in line or "Station Name:" in line or "Test File Name:" in line:
@@ -174,6 +178,9 @@ def upload_to_database(df, station_name):
         db_port = os.getenv('DB_PORT')
         db_name = os.getenv('DB_NAME')
 
+        if not all([db_username, db_password, db_host, db_port, db_name]):
+            raise EnvironmentError("Missing one or more required environment variables for the database connection")
+
         table_name = get_table_name_from_station(station_name)
 
         print(f"Attempting to connect to the database and upload to table: {table_name}...")
@@ -205,7 +212,7 @@ if __name__ == "__main__":
     df, last_processed_line = process_data_file(input_file, last_line, etl_log_id)
 
     # Get the station_name from the metadata returned during processing
-    headers, header_tstamp_first, station_name, test_file_name = extract_columns_and_metadata(open(input_file).readlines())
+    headers, header_tstamp_first, station_name, test_file_name = extract_columns_and_metadata(open(input_file).readlines(), last_line)
 
     # Upload the DataFrame to the PostgreSQL database, passing the station_name
     if not df.empty and upload_to_database(df, station_name):  # Pass station_name here
