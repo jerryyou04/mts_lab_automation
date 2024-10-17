@@ -1,7 +1,7 @@
 import pandas as pd
 import os
 import traceback
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, Integer, TIMESTAMP, text
 from datetime import datetime
 from dotenv import load_dotenv
 
@@ -110,32 +110,42 @@ def extract_columns_and_metadata(lines, last_line_processed):
 
 
 
-# Function to process the .dat file and convert it into a pandas DataFrame
 def process_data_file(lines, last_line_processed, etl_log_id):
     data = []
+    most_recent_header_timestamp = None  # Track the most recent timestamp
     
     print(f"Successfully read {len(lines)} lines from the file.")
     
+    # Extract headers and metadata
     headers, header_tstamp_first, station_name, test_file_name = extract_columns_and_metadata(lines, last_line_processed)
 
     if not headers:
         print("Error: No headers found in the file.")
-        return pd.DataFrame(), last_line_processed
+        return pd.DataFrame(), last_line_processed, station_name
 
     # Log metadata once for the run
     append_to_log_file(etl_log_id, header_tstamp_first, station_name, test_file_name)
 
     in_data_section = False  # Track whether we are in the data section
     data_count = 0  # Track number of data lines processed
-
     skip_units_row = False  # Set a flag to skip the units row
 
     for i in range(last_line_processed, len(lines)):
         line = lines[i].strip()
 
+        # Handle the most recent Data Header timestamp
+        if "Data Header:" in line:
+            # Extract the timestamp from the header
+            parts = line.split("\t")
+            if len(parts) > 4:
+                timestamp_from_file = parts[-1].strip()
+                # Convert to SQL format
+                parsed_timestamp = datetime.strptime(timestamp_from_file, "%m/%d/%Y %I:%M:%S %p")
+                most_recent_header_timestamp = parsed_timestamp.strftime("%Y-%m-%d %H:%M:%S")
+            continue  # Continue to the next line, we're still processing metadata
 
         # Skip metadata sections until the data section begins
-        if "Data Header:" in line or "Station Name:" in line or "Test File Name:" in line:
+        if "Station Name:" in line or "Test File Name:" in line:
             in_data_section = False  # Still in metadata
             continue
 
@@ -153,23 +163,55 @@ def process_data_file(lines, last_line_processed, etl_log_id):
         if in_data_section:
             columns = line.split("\t")  # Split using tab between columns
 
-            if len(columns) == len(headers):  # Ensure the number of columns matches the headers
+            # Ensure the number of columns matches the headers before adding the extra columns
+            if len(columns) == len(headers):
                 try:
                     # Convert the data to appropriate types (assuming floats for simplicity)
                     row_data = [float(c) for c in columns]
-                    row_data.append(etl_log_id)  # Add etl_log_id to each data row
+                    
+                    # Insert etl_log_id and header_timestamp at the right positions
+                    row_data.insert(0, etl_log_id)  # Insert etl_log_id as first column
+                    row_data.insert(1, most_recent_header_timestamp)  # Insert most recent header timestamp as second column
+                    
                     data.append(row_data)
                     data_count += 1  # Increment the number of data lines processed
                 except ValueError as ve:
                     print(f"Skipping line {i + 1} due to ValueError: {ve}")
                     print(f"Offending line: {line}")
+    
+    # Add 3 extra headers for the new columns: id, etl_log_id, and header_timestamp
+    headers = ['etl_log_id', 'header_timestamp'] + headers  # Adjust headers accordingly
 
-    headers.append("etl_log_id")  # Add the etl_log_id column to the DataFrame headers
+    # Create DataFrame and insert id column (auto-incremented)
     df = pd.DataFrame(data, columns=headers)
 
     print(f"Total rows processed: {len(df)}")
 
-    return df, len(lines), station_name  # Also return the last line number to update last_line.txt after DB insertion
+    return df, len(lines), station_name
+
+
+
+def create_table_if_not_exists(engine, table_name, df):
+    """
+    Check if the table exists. If not, create it with an id SERIAL PRIMARY KEY.
+    The rest of the columns are dynamically created based on the DataFrame headers.
+    """
+    # Extract columns from DataFrame headers
+    dynamic_columns = ", ".join([f'"{col}" FLOAT' for col in df.columns if col not in ['id']])
+    
+    # SQL statement to create the table if it doesn't exist
+    create_table_query = f"""
+    CREATE TABLE IF NOT EXISTS {table_name} (
+        id SERIAL PRIMARY KEY,
+        {dynamic_columns}
+    );
+    """
+    
+    print(f"Creating table with query:\n{create_table_query}")
+    with engine.connect() as connection:
+        connection.execute(text(create_table_query))
+    print(f"Table {table_name} was created.")
+
 
 # Function to upload data to the PostgreSQL database using SQLAlchemy
 def upload_to_database(df, station_name):
@@ -194,8 +236,10 @@ def upload_to_database(df, station_name):
         engine = create_engine(f'postgresql+psycopg2://{db_username}:{db_password}@{db_host}:{db_port}/{db_name}')
         print("Successfully connected to the database.")
 
+        create_table_if_not_exists(engine, table_name, df) 
+
         print(f"Inserting data into the table {table_name}...")
-        df.to_sql(table_name, engine, if_exists='append', index=False)  # Use append, not replace
+        df.to_sql(table_name, engine, if_exists='append', index=False, dtype={'etl_log_id': Integer(), 'header_timestamp': TIMESTAMP()})
         print(f"Inserted {len(df)} rows into the {table_name} table.")
         return True
 
