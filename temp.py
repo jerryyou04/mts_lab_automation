@@ -36,7 +36,7 @@ def save_etl_log_id(log_file, etl_log_id):
     with open(log_file, 'w') as f:
         f.write(str(etl_log_id))
 
-def append_to_log_file(etl_log_id, header_tstamp_first, station_name, test_file_name):
+def append_to_log_file(etl_log_id, header_tstamp_first, station_name, test_file_name, table_name):
     # Get the current month and year
     current_month_year = datetime.now().strftime("%Y_%m")
     log_filename = f"etl_log_{current_month_year}.txt"  # Filename based on the current year and month
@@ -48,17 +48,17 @@ def append_to_log_file(etl_log_id, header_tstamp_first, station_name, test_file_
     with open(log_filename, 'a') as log_file:
         # If the file doesn't exist, write the TSV header
         if not file_exists:
-            log_file.write("id\tbegan_at_timestamp\theader_tstamp_first\tstation_name\ttest_file_name\n")
+            log_file.write("id\tbegan_at_timestamp\theader_tstamp_first\tstation_name\ttest_file_name\ttable_name\n")
         
-        # Append the log entry in TSV format
+        # Append the log entry in TSV format, including the table_name
         timestamp_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        log_file.write(f"{etl_log_id}\t{timestamp_now}\t{header_tstamp_first}\t{station_name}\t{test_file_name}\n")
+        log_file.write(f"{etl_log_id}\t{timestamp_now}\t{header_tstamp_first}\t{station_name}\t{test_file_name}\t{table_name}\n")
 
 # Function to determine the table name based on the station name
 def get_table_name_from_station(station_name):
     if "table" in station_name.lower():
         return "table_top"
-    elif "810" in station_name:
+    elif "kN" in station_name:
         return "mts_810"
     elif "slot" in station_name.lower():
         return "t_slot"
@@ -120,7 +120,7 @@ def process_data_file(lines, last_line_processed, etl_log_id):
         return pd.DataFrame(), last_line_processed, station_name
 
     # Log metadata once for the run
-    append_to_log_file(etl_log_id, header_tstamp_first, station_name, test_file_name)
+    append_to_log_file(etl_log_id, header_tstamp_first, station_name, test_file_name, get_table_name_from_station(station_name))
 
     in_data_section = False  # Track whether we are in the data section
     data_count = 0  # Track number of data lines processed
@@ -168,6 +168,7 @@ def process_data_file(lines, last_line_processed, etl_log_id):
                     # Insert etl_log_id and header_timestamp at the right positions
                     row_data.insert(0, etl_log_id)  # Insert etl_log_id as first column
                     row_data.insert(1, most_recent_header_timestamp)  # Insert most recent header timestamp as second column
+                    row_data.insert(2, station_name)
                     
                     data.append(row_data)
                     data_count += 1  # Increment the number of data lines processed
@@ -176,7 +177,7 @@ def process_data_file(lines, last_line_processed, etl_log_id):
                     print(f"Offending line: {line}")
     
     # Add 3 extra headers for the new columns: etl_log_id, header_timestamp
-    headers = ['etl_log_id', 'header_timestamp'] + headers  # Adjust headers accordingly
+    headers = ['etl_log_id', 'header_timestamp', 'station_name'] + headers  
 
     # Create DataFrame and return it
     df = pd.DataFrame(data, columns=headers)
@@ -200,6 +201,8 @@ def create_table_if_not_exists(engine, table_name, df):
                 columns.append(Column(col, TIMESTAMP))
             elif col == "etl_log_id":
                 columns.append(Column(col, Integer))
+            elif col == "station_name":
+                columns.append(Column(col, String))
             else:
                 columns.append(Column(col, Float))  # Assume float for other columns
     
