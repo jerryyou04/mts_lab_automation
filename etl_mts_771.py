@@ -7,6 +7,8 @@ from sqlalchemy.sql import text
 from datetime import datetime
 from dotenv import load_dotenv
 
+
+
 def setup_logging():
     # Get the current month and year
     current_month_year = datetime.now().strftime("%Y_%m")
@@ -23,18 +25,46 @@ def setup_logging():
     # Log initialization message
     logging.info("Logging setup completed.")
 
-load_dotenv()
-
-# Call the setup_logging function to configure logging when the script starts
-setup_logging()
-
-def log_error(etl_log_id, header_tstamp_first, station_name, test_file_name, table_name, error_message):
+def log_error(error_message):
     current_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
+    # Retrieve values directly from etl_metadata (no need for default 'N/A' since they are already initialized)
+    etl_log_id = etl_metadata['etl_log_id']
+    header_tstamp_first = etl_metadata['header_tstamp_first']
+    station_name = etl_metadata['station_name']
+    test_file_name = etl_metadata['test_file_name']
+    table_name = etl_metadata['table_name']
+
+    # Create the log entry with the retrieved metadata
     log_entry = f"{etl_log_id}\t{current_timestamp}\t{header_tstamp_first}\t{station_name}\t{test_file_name}\t{table_name}\t{error_message}"
 
     # Log both to the file and print to the console
     print(log_entry)
     logging.error(log_entry)
+
+    
+def initialize_metadata(etl_log_id, header_tstamp_first, station_name, test_file_name, table_name):
+    global etl_metadata
+    etl_metadata['etl_log_id'] = etl_log_id
+    etl_metadata['header_tstamp_first'] = header_tstamp_first
+    etl_metadata['station_name'] = station_name
+    etl_metadata['test_file_name'] = test_file_name
+    etl_metadata['table_name'] = table_name
+
+load_dotenv()
+
+# Call the setup_logging function to configure logging when the script starts
+setup_logging()
+
+etl_metadata = {
+    'etl_log_id': 'N/A',
+    'header_tstamp_first': 'N/A',
+    'station_name': 'N/A',
+    'test_file_name': 'N/A',
+    'table_name': 'N/A'
+}
+
+
 
 # Function to read the last processed line from last_line.txt
 def read_last_processed_line(filepath):
@@ -43,10 +73,11 @@ def read_last_processed_line(filepath):
             with open(filepath, 'r') as f:
                 return int(f.read().strip())
         except ValueError:
-            logging.error(f"Warning: Could not read an integer from {filepath}. Defaulting to 0.")
-            print(f"Warning: Could not read an integer from {filepath}. Defaulting to 0.")
-    print(f"No file found")
-    return 0
+            log_error(f"Warning: Could not read an integer from {filepath}. Defaulting to 0.")
+            return 0
+    else:
+        log_error(f"No file found at {filepath}")  # Log the error
+        raise FileNotFoundError(f"{filepath} is missing. Please create or provide the file.")
 
 # Function to save the last processed line to a text file
 def save_last_processed_line(filepath, line_num):
@@ -95,7 +126,7 @@ def get_table_name_from_folder(folder_name):
         return "placeholder"
     else:
         error_message = f"Unrecognized folder name: {folder_name}"
-        logging.error(error_message)
+        log_error(error_message)
         raise ValueError(error_message)
 
 # Function to extract column names and metadata from the file
@@ -107,34 +138,37 @@ def extract_columns_and_metadata(lines, last_line_processed):
     found_test_file = False
 
     # Start from the last processed line
-    for i in range(last_line_processed, len(lines)):
-        line = lines[i].strip()
+    try:
+        for i in range(last_line_processed, len(lines)):
+            line = lines[i].strip()
 
-        if "Data Header:" in line:
-            # Extract the timestamp from the latest Data Header
-            parts = line.split("\t")
-            if len(parts) > 4:
-                timestamp_from_file = parts[-1].strip()
-                # Convert to SQL format
-                parsed_timestamp = datetime.strptime(timestamp_from_file, "%m/%d/%Y %I:%M:%S %p")
-                header_tstamp_first = parsed_timestamp.strftime("%Y-%m-%d %H:%M:%S")
+            if "Data Header:" in line:
+                # Extract the timestamp from the latest Data Header
+                parts = line.split("\t")
+                if len(parts) > 4:
+                    timestamp_from_file = parts[-1].strip()
+                    # Convert to SQL format
+                    parsed_timestamp = datetime.strptime(timestamp_from_file, "%m/%d/%Y %I:%M:%S %p")
+                    header_tstamp_first = parsed_timestamp.strftime("%Y-%m-%d %H:%M:%S")
 
-        elif "Station Name:" in line:
-            station_name = line.split(":")[1].strip()
-        elif "Test File Name:" in line:
-            test_file_name = line.split(":")[1].strip()
-            found_test_file = True  # After this, we expect the headers to be in the next line
-            continue
+            elif "Station Name:" in line:
+                station_name = line.split(":")[1].strip()
+            elif "Test File Name:" in line:
+                test_file_name = line.split(":")[1].strip()
+                found_test_file = True  # After this, we expect the headers to be in the next line
+                continue
 
-        # If we just found the test file name, expect the next line to be the headers
-        if found_test_file and not headers:
-            headers = line.split("\t")  # Use the next line as headers
-            print(f"Detected headers: {headers}")  # DEBUG
-            break  # We have found the headers, stop searching
+            # If we just found the test file name, expect the next line to be the headers
+            if found_test_file and not headers:
+                headers = line.split("\t")  # Use the next line as headers
+                print(f"Detected headers: {headers}")  # DEBUG
+                break  # We have found the headers, stop searching
 
-    if not headers:
-        logging.error("Error: No valid headers found.")
-        print("Error: No valid headers found.")
+        if not headers:
+            log_error("No valid headers found in the file.")
+    
+    except Exception as e:
+        log_error(f"Error during metadata extraction: {e}")
     
     return headers, header_tstamp_first, station_name, test_file_name
 
@@ -148,8 +182,10 @@ def process_data_file(lines, last_line_processed, etl_log_id, table_name):
     headers, header_tstamp_first, station_name, test_file_name = extract_columns_and_metadata(lines, last_line_processed)
 
     if not headers:
-        print("Error: No headers found in the file.")
+        log_error("No headers found in the file. (end of file?)")
         return pd.DataFrame(), last_line_processed, station_name
+
+    initialize_metadata(etl_log_id, header_tstamp_first, station_name, test_file_name, table_name)
 
     # Log metadata once for the run
     append_to_log_file(etl_log_id, header_tstamp_first, station_name, test_file_name, table_name)
@@ -205,8 +241,8 @@ def process_data_file(lines, last_line_processed, etl_log_id, table_name):
                     data.append(row_data)
                     data_count += 1  # Increment the number of data lines processed
                 except ValueError as ve:
-                    print(f"Skipping line {i + 1} due to ValueError: {ve}")
-                    print(f"Offending line: {line}")
+                    log_error(f"Skipping line {i + 1} due to ValueError: {ve}")
+                    log_error(f"Offending line: {line}")
     
     # Add 3 extra headers for the new columns: etl_log_id, header_timestamp
     headers = ['etl_log_id', 'header_timestamp', 'station_name'] + headers  
@@ -301,7 +337,7 @@ def upload_to_database(df, table_name):
 
     except Exception as e:
         print(f"An error occurred during database interaction: {e}")
-        logging.error(f"An error occurred during database interaction: {e}")
+        log_error(f"An error occurred during database interaction: {e}")
         logging.error(traceback.format_exc())
         return False
 
@@ -319,7 +355,7 @@ if __name__ == "__main__":
         table_name = get_table_name_from_folder(folder_name)
         print(f"Table name determined from folder: {table_name}")
     except ValueError as e:
-        print(e)
+        log_error(str(e))
         exit(1)  # Exit if an unrecognized folder name is provided
 
     
@@ -330,8 +366,8 @@ if __name__ == "__main__":
             lines = infile.readlines()
             print(f"Read {len(lines)} lines from the file.")
     else:
-        print(f"File not found: {input_file}")
-        logging.error(f"File not found: {input_file}")
+        log_error(f"File not found: {input_file}")
+        exit(1)
 
 
     # Read last processed line
