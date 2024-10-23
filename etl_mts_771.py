@@ -1,12 +1,40 @@
 import pandas as pd
 import os
 import traceback
+import logging
 from sqlalchemy import create_engine, Integer, TIMESTAMP, MetaData, Table, Column, Float, String, BigInteger
 from sqlalchemy.sql import text
 from datetime import datetime
 from dotenv import load_dotenv
 
+def setup_logging():
+    # Get the current month and year
+    current_month_year = datetime.now().strftime("%Y_%m")
+    log_filename = f"etl_error_log_{current_month_year}.txt"  # Filename based on the current year and month
+
+    # Configure logging to log to the specified file and include time, error level, and message
+    logging.basicConfig(
+        filename=log_filename,
+        level=logging.ERROR,  # Only log errors or more severe issues
+        format='%(asctime)s - %(levelname)s - %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+
+    # Log initialization message
+    logging.info("Logging setup completed.")
+
 load_dotenv()
+
+# Call the setup_logging function to configure logging when the script starts
+setup_logging()
+
+def log_error(etl_log_id, header_tstamp_first, station_name, test_file_name, table_name, error_message):
+    current_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    log_entry = f"{etl_log_id}\t{current_timestamp}\t{header_tstamp_first}\t{station_name}\t{test_file_name}\t{table_name}\t{error_message}"
+
+    # Log both to the file and print to the console
+    print(log_entry)
+    logging.error(log_entry)
 
 # Function to read the last processed line from last_line.txt
 def read_last_processed_line(filepath):
@@ -15,6 +43,7 @@ def read_last_processed_line(filepath):
             with open(filepath, 'r') as f:
                 return int(f.read().strip())
         except ValueError:
+            logging.error(f"Warning: Could not read an integer from {filepath}. Defaulting to 0.")
             print(f"Warning: Could not read an integer from {filepath}. Defaulting to 0.")
     print(f"No file found")
     return 0
@@ -55,17 +84,19 @@ def append_to_log_file(etl_log_id, header_tstamp_first, station_name, test_file_
         log_file.write(f"{etl_log_id}\t{timestamp_now}\t{header_tstamp_first}\t{station_name}\t{test_file_name}\t{table_name}\n")
 
 # Function to determine the table name based on the folder name (last part of the folder)
-def get_table_name_from_folder(folder_name):
-    if "table" in folder_name.lower():
+def get_table_name_from_folder(folder_name):  
+    if folder_name == "Table Top":
         return "table_top"
-    elif "T24" in folder_name:
+    elif folder_name == "T24-64":
         return "rotary"
-    elif "MTS" in folder_name.lower():
-        return "MTS_810"
-    elif "placeholder" in folder_name.lower():
+    elif folder_name == "MTS 810":
+        return "mts_810"
+    elif folder_name == "placeholder":
         return "placeholder"
     else:
-        raise ValueError(f"Unrecognized folder name: {folder_name}")
+        error_message = f"Unrecognized folder name: {folder_name}"
+        logging.error(error_message)
+        raise ValueError(error_message)
 
 # Function to extract column names and metadata from the file
 def extract_columns_and_metadata(lines, last_line_processed):
@@ -102,6 +133,7 @@ def extract_columns_and_metadata(lines, last_line_processed):
             break  # We have found the headers, stop searching
 
     if not headers:
+        logging.error("Error: No valid headers found.")
         print("Error: No valid headers found.")
     
     return headers, header_tstamp_first, station_name, test_file_name
@@ -187,17 +219,13 @@ def process_data_file(lines, last_line_processed, etl_log_id, table_name):
     return df, len(lines), station_name
 
 def create_table_if_not_exists(engine, table_name, df):
-    """
-    Check if the table exists. If not, create it with an id SERIAL PRIMARY KEY.
-    The rest of the columns are dynamically created based on the DataFrame headers.
-    """
     metadata = MetaData()
 
     # Define dynamic columns based on DataFrame
-    columns = [Column('id', BigInteger, primary_key=True, autoincrement=True)]  # Add id column with autoincrement
+    columns = [Column('id', BigInteger, primary_key=True)]
     for col in df.columns:
-        if col not in ['id']:  # Avoid creating id twice
-            if col == "header_timestamp":  
+        if col not in ['id']:
+            if col == "header_timestamp":
                 columns.append(Column(col, TIMESTAMP))
             elif col == "etl_log_id":
                 columns.append(Column(col, Integer))
@@ -206,13 +234,42 @@ def create_table_if_not_exists(engine, table_name, df):
             else:
                 columns.append(Column(col, Float))  # Assume float for other columns
     
-    # Create the table object
+    # Step 1: Create the table if it does not exist
     table = Table(table_name, metadata, *columns)
-
-    # Create the table if it does not exist
     metadata.create_all(engine)
-    print(f"Table '{table_name}' is ready.")
 
+    # Hardcoded start values for sequences
+    start_values = {
+        'table_top': 1,
+        'rotary': 2 * 10**18,
+        'mts_810': 3 * 10**18,
+        'placeholder': 4 * 10**18
+    }
+
+    start_value = start_values.get(table_name, 1)
+    sequence_name = f"{table_name}_id_seq"
+
+    with engine.connect() as conn:
+        # Check if sequence exists
+        sequence_check_query = f"SELECT 1 FROM pg_class WHERE relname = '{sequence_name}' AND relkind = 'S'"
+        sequence_exists = conn.execute(text(sequence_check_query)).fetchone()
+
+        if not sequence_exists:
+            print(f"Creating sequence: {sequence_name}")
+            conn.execute(text(f"CREATE SEQUENCE {sequence_name} START WITH {start_value};"))
+        else:
+            print(f"Sequence {sequence_name} already exists, not restarting.")
+
+        # Commit to persist the changes
+        conn.commit()
+
+        # Attach the sequence to the id column, but only if it's not already attached
+        try:
+            conn.execute(text(f"ALTER TABLE \"{table_name}\" ALTER COLUMN id SET DEFAULT nextval('{sequence_name}');"))
+        except Exception as e:
+            print(f"Error attaching sequence to id column: {e}")
+
+    print(f"Table '{table_name}' is ready.")
 
 # Function to upload data to the PostgreSQL database using SQLAlchemy
 def upload_to_database(df, table_name):
@@ -238,17 +295,20 @@ def upload_to_database(df, table_name):
         create_table_if_not_exists(engine, table_name, df)
 
         print(f"Inserting data into the table {table_name}...")
-        df.to_sql(table_name, engine, if_exists='append', index=False, dtype={'etl_log_id': Integer(), 'header_timestamp': TIMESTAMP()})
+        df.to_sql(table_name, engine, if_exists='append', index=False, chunksize = 10000, dtype={'etl_log_id': Integer(), 'header_timestamp': TIMESTAMP()})
         print(f"Inserted {len(df)} rows into the {table_name} table.")
         return True
 
     except Exception as e:
         print(f"An error occurred during database interaction: {e}")
-        traceback.print_exc()
+        logging.error(f"An error occurred during database interaction: {e}")
+        logging.error(traceback.format_exc())
         return False
 
 if __name__ == "__main__":
-    input_file = r'C:\MTS 793\Projects\Project1\Current\Table Top\input_data.dat'  
+    # input_file = r'C:\MTS 793\Projects\Project1\Current\Table Top\input_data.dat' 
+    input_file = r'C:\MTS 793\Projects\Project1\Current\T24-64\ab1v  rt5 input carrier 2006 nm oct 16 2024.dat'
+    # input_file = r'C:\MTS 793\Projects\Project1\Current\MTS 810\t24-62 10 shaft torque fatigue test t2.dat'
     last_line_file = 'last_line.txt'
     etl_log_file = 'etl_log_id.txt'
 
@@ -271,6 +331,8 @@ if __name__ == "__main__":
             print(f"Read {len(lines)} lines from the file.")
     else:
         print(f"File not found: {input_file}")
+        logging.error(f"File not found: {input_file}")
+
 
     # Read last processed line
     last_line = read_last_processed_line(last_line_file)
