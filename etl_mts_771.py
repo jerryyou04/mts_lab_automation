@@ -7,8 +7,6 @@ from sqlalchemy.sql import text
 from datetime import datetime
 from dotenv import load_dotenv
 
-
-
 def setup_logging():
     # Get the current month and year
     current_month_year = datetime.now().strftime("%Y_%m")
@@ -17,30 +15,10 @@ def setup_logging():
     # Configure logging to log to the specified file and include time, error level, and message
     logging.basicConfig(
         filename=log_filename,
-        level=logging.ERROR,  # Only log errors or more severe issues
-        format='%(asctime)s - %(levelname)s - %(message)s',
+        level=logging.DEBUG,  
+        format='%(asctime)s\t%(levelname)s\t%(message)s',
         datefmt='%Y-%m-%d %H:%M:%S'
     )
-
-    # Log initialization message
-    logging.info("Logging setup completed.")
-
-def log_error(error_message):
-    current_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    
-    # Retrieve values directly from etl_metadata (no need for default 'N/A' since they are already initialized)
-    etl_log_id = etl_metadata['etl_log_id']
-    header_tstamp_first = etl_metadata['header_tstamp_first']
-    station_name = etl_metadata['station_name']
-    test_file_name = etl_metadata['test_file_name']
-    table_name = etl_metadata['table_name']
-
-    # Create the log entry with the retrieved metadata
-    log_entry = f"{etl_log_id}\t{current_timestamp}\t{header_tstamp_first}\t{station_name}\t{test_file_name}\t{table_name}\t{error_message}"
-
-    # Log both to the file and print to the console
-    print(log_entry)
-    logging.error(log_entry)
 
     
 def initialize_metadata(etl_log_id, header_tstamp_first, station_name, test_file_name, table_name):
@@ -73,10 +51,10 @@ def read_last_processed_line(filepath):
             with open(filepath, 'r') as f:
                 return int(f.read().strip())
         except ValueError:
-            log_error(f"Warning: Could not read an integer from {filepath}. Defaulting to 0.")
+            logging.warning(f"Warning: Could not read an integer from {filepath}. Defaulting to 0.")
             return 0
     else:
-        log_error(f"No file found at {filepath}")  # Log the error
+        logging.error(f"No file found at {filepath}")  # Log the error
         raise FileNotFoundError(f"{filepath} is missing. Please create or provide the file.")
 
 # Function to save the last processed line to a text file
@@ -126,7 +104,7 @@ def get_table_name_from_folder(folder_name):
         return "placeholder"
     else:
         error_message = f"Unrecognized folder name: {folder_name}"
-        log_error(error_message)
+        logging.error(error_message)
         raise ValueError(error_message)
 
 # Function to extract column names and metadata from the file
@@ -165,10 +143,10 @@ def extract_columns_and_metadata(lines, last_line_processed):
                 break  # We have found the headers, stop searching
 
         if not headers:
-            log_error("No valid headers found in the file.")
+            logging.error("No valid headers found in the file.")
     
     except Exception as e:
-        log_error(f"Error during metadata extraction: {e}")
+        logging.error(f"Error during metadata extraction: {e}")
     
     return headers, header_tstamp_first, station_name, test_file_name
 
@@ -182,7 +160,7 @@ def process_data_file(lines, last_line_processed, etl_log_id, table_name):
     headers, header_tstamp_first, station_name, test_file_name = extract_columns_and_metadata(lines, last_line_processed)
 
     if not headers:
-        log_error("No headers found in the file. (end of file?)")
+        logging.error("No headers found in the file. (end of file?)")
         return pd.DataFrame(), last_line_processed, station_name
 
     initialize_metadata(etl_log_id, header_tstamp_first, station_name, test_file_name, table_name)
@@ -241,8 +219,7 @@ def process_data_file(lines, last_line_processed, etl_log_id, table_name):
                     data.append(row_data)
                     data_count += 1  # Increment the number of data lines processed
                 except ValueError as ve:
-                    log_error(f"Skipping line {i + 1} due to ValueError: {ve}")
-                    log_error(f"Offending line: {line}")
+                    logging.error(f"Skipping line {i + 1} due to ValueError: {ve}")
     
     # Add 3 extra headers for the new columns: etl_log_id, header_timestamp
     headers = ['etl_log_id', 'header_timestamp', 'station_name'] + headers  
@@ -337,14 +314,15 @@ def upload_to_database(df, table_name):
 
     except Exception as e:
         print(f"An error occurred during database interaction: {e}")
-        log_error(f"An error occurred during database interaction: {e}")
-        logging.error(traceback.format_exc())
+        logging.error(f"An error occurred during database interaction: {e}")
         return False
 
 if __name__ == "__main__":
     # input_file = r'C:\MTS 793\Projects\Project1\Current\Table Top\input_data.dat' 
     input_file = r'C:\MTS 793\Projects\Project1\Current\T24-64\ab1v  rt5 input carrier 2006 nm oct 16 2024.dat'
     # input_file = r'C:\MTS 793\Projects\Project1\Current\MTS 810\t24-62 10 shaft torque fatigue test t2.dat'
+    # input_file = r'C:\MTS 793\Projects\Project1\Current\temp\temp.dat'
+
     last_line_file = 'last_line.txt'
     etl_log_file = 'etl_log_id.txt'
 
@@ -355,7 +333,7 @@ if __name__ == "__main__":
         table_name = get_table_name_from_folder(folder_name)
         print(f"Table name determined from folder: {table_name}")
     except ValueError as e:
-        log_error(str(e))
+        logging.critical(str(e))
         exit(1)  # Exit if an unrecognized folder name is provided
 
     
@@ -366,9 +344,8 @@ if __name__ == "__main__":
             lines = infile.readlines()
             print(f"Read {len(lines)} lines from the file.")
     else:
-        log_error(f"File not found: {input_file}")
+        logging.error(f"File not found: {input_file}")
         exit(1)
-
 
     # Read last processed line
     last_line = read_last_processed_line(last_line_file)
