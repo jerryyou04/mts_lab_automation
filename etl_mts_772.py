@@ -9,12 +9,10 @@ from dotenv import load_dotenv
 
 ############################################################# logging
 def setup_logging():
-    # Get the current month and year
-    current_month_year = datetime.now().strftime("%Y_%m")
+    current_month_year = datetime.now().strftime("%Y_%m")     
     log_filename = f"etl_error_log_{current_month_year}.txt"  # Filename based on the current year and month
 
-    # Configure logging to log to the specified file and include time, error level, and message
-    logging.basicConfig(
+    logging.basicConfig(     # Configure logging to log to the specified file and include time, error level, and message
         level=logging.DEBUG,  
         format='%(asctime)s\t%(levelname)s\t%(message)s',
         datefmt='%Y-%m-%d %H:%M:%S',
@@ -23,29 +21,11 @@ def setup_logging():
             logging.StreamHandler()  # Also print to console
         ]
     )
-########################################################################
-
-
 ###################################################################### Setup and global variables
-load_dotenv()
+load_dotenv() 
+setup_logging() 
 
-# Call the setup_logging function to configure logging when the script starts
-setup_logging()
-
-folders = [
-    r'C:\MTS 793\Projects\Project1\Current\Table Top',
-    r'C:\MTS 793\Projects\Project1\Current\T24-64',
-    r'C:\MTS 793\Projects\Project1\Current\MTS 810',
-    r'C:\MTS 793\Projects\Project1\Current\temp'
-]
-
-mod_times_file = 'file_mod_times.txt'  # File to track modification times
 file_mod_times = {}  
-last_lines_tsv_file = 'last_lines.txt'
-
-#########################################################
-
-
 ########################################################## File modification times in OS
 # Load modification times from a text file
 def load_modification_times():
@@ -112,8 +92,8 @@ def track_modified_files(log_file, directories):
     
     return modified_files
 
-
-# Process each modified file (existing logic)
+########################################################################################## Process each file in a loop
+# Process each modified file 
 def process_and_upload_files(modified_files, last_lines):
     etl_log_file = 'etl_log_id.txt'  # Hardcoded the log file path
     for input_file in modified_files:
@@ -158,10 +138,8 @@ def process_and_upload_files(modified_files, last_lines):
         except Exception as e:
             logging.error(f"Error processing {input_file}: {str(e)}")
         logging.info(f"Finished processing file: {input_file}")
-#######################################################################
-
 ######################################################################## Last line and logging
-def load_last_processed_lines(tsv_file='last_lines.txt'):
+def load_last_processed_lines(tsv_file='last_lines.txt'): #retrieves
     last_lines = {}
     if os.path.exists(tsv_file):
         with open(tsv_file, 'r') as f:
@@ -183,11 +161,9 @@ def read_last_processed_line(input_file, last_lines):
     else:
         return 0  # Default to 0 if the file hasn't been processed before
 
-# Function to update the last processed line for a specific file
 def update_last_processed_line(input_file, last_line, last_lines):
     last_lines[input_file] = last_line
 
-# Function to read and increment the etl_log_id from a text file
 def read_etl_log_id(log_file):
     if os.path.exists(log_file):
         with open(log_file, 'r') as f:
@@ -200,21 +176,17 @@ def save_etl_log_id(log_file, etl_log_id):
         f.write(str(etl_log_id))
 
 def append_to_log_file(etl_log_id, header_tstamp_first, station_name, test_file_name, table_name):
-    # Get the current month and year
     current_month_year = datetime.now().strftime("%Y_%m")
     log_filename = f"etl_log_{current_month_year}.txt"  # Filename based on the current year and month
 
     # Check if the file exists
     file_exists = os.path.exists(log_filename)
 
-    # Open the log file in append mode
     with open(log_filename, 'a') as log_file:
-        # If the file doesn't exist, write the TSV header
-        if not file_exists:
+        if not file_exists: # If the file doesn't exist, write the TSV header
             log_file.write("id\tbegan_at_timestamp\theader_tstamp_first\tstation_name\ttest_file_name\ttable_name\n")
-        
-        # Append the log entry in TSV format, including the table_name
-        timestamp_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        timestamp_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")         # Append the log entry in TSV format, including the table_name
         log_file.write(f"{etl_log_id}\t{timestamp_now}\t{header_tstamp_first}\t{station_name}\t{test_file_name}\t{table_name}\n")
 
 # Function to determine the table name based on the folder name (last part of the folder)
@@ -282,17 +254,13 @@ def process_data_file(lines, last_line_processed, etl_log_id, table_name):
     data = []
     most_recent_header_timestamp = None  # Track the most recent timestamp
     
-    print(f"Successfully read {len(lines)} lines from the file.")
-    
-    # Extract headers and metadata
     headers, header_tstamp_first, station_name, test_file_name = extract_columns_and_metadata(lines, last_line_processed)
 
     if not headers:
         logging.error("No headers found in the file. (end of file?)")
         return pd.DataFrame(), last_line_processed, station_name
 
-    # Log metadata once for the run
-    append_to_log_file(etl_log_id, header_tstamp_first, station_name, test_file_name, table_name)
+    append_to_log_file(etl_log_id, header_tstamp_first, station_name, test_file_name, table_name)     # Log metadata once for the run
 
     in_data_section = False  # Track whether we are in the data section
     data_count = 0  # Track number of data lines processed
@@ -347,10 +315,8 @@ def process_data_file(lines, last_line_processed, etl_log_id, table_name):
                 except ValueError as ve:
                     logging.error(f"Skipping line {i + 1} due to ValueError: {ve}")
     
-    # Add 3 extra headers for the new columns: etl_log_id, header_timestamp
-    headers = ['etl_log_id', 'header_timestamp', 'station_name'] + headers  
+    headers = ['etl_log_id', 'header_timestamp', 'station_name'] + headers      # Add 3 extra headers for the new columns: etl_log_id, header_timestamp
 
-    # Create DataFrame and return it
     df = pd.DataFrame(data, columns=headers)
 
     print(f"Total rows processed: {len(df)}")
@@ -455,7 +421,6 @@ def upload_to_database(df, table_name):
 
 ############################################################################################
 if __name__ == "__main__":
-    # Define the directories to check for modified files
     directories = [
         r'C:\MTS 793\Projects\Project1\Current\Table Top',
         r'C:\MTS 793\Projects\Project1\Current\T24-64',
@@ -463,22 +428,14 @@ if __name__ == "__main__":
         r'C:\MTS 793\Projects\Project1\Current\temp'
     ]
 
-    # Log file to track modification times
     mod_log_file = 'file_mod_times.txt'
-
-    # Load the last processed lines from the file
-    last_lines = load_last_processed_lines()
-
-    # Get the list of modified files
-    modified_files = track_modified_files(mod_log_file, directories)
+    last_lines = load_last_processed_lines() # Load the last processed lines from the file
+    
+    modified_files = track_modified_files(mod_log_file, directories) # Get the list of modified files so we know which ones to update
 
     if modified_files:
         logging.info(f"Modified files detected: {modified_files}")
+        process_and_upload_files(modified_files, last_lines)  # Process each modified file and track last processed lines
+        save_last_processed_lines(last_lines)     # Save the updated last processed lines to the file
     else:
         logging.info("No modified files found in any of the folders.")
-
-    # Process each modified file and track last processed lines
-    process_and_upload_files(modified_files, last_lines)
-
-    # Save the updated last processed lines to the file
-    save_last_processed_lines(last_lines)
