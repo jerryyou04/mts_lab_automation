@@ -56,8 +56,7 @@ def track_modified_files(log_file, directories):
     modified_files = []
     valid_directories = 0  # Track how many valid directories are found
 
-    # Read the last recorded file mod times
-    last_mod_times = {}
+    last_mod_times = {} # Read the last recorded file mod times
     if os.path.exists(log_file):
         with open(log_file, 'r') as f:
             for line in f:
@@ -92,6 +91,10 @@ def track_modified_files(log_file, directories):
     
     return modified_files
 
+def get_last_line_of_file(file_path): # helper to find the last line of a file.
+    with open(file_path, 'r') as f:
+        return sum(1 for _ in f)
+
 ########################################################################################## Process each file in a loop
 # Process each modified file 
 def process_and_upload_files(modified_files, last_lines):
@@ -100,38 +103,30 @@ def process_and_upload_files(modified_files, last_lines):
         logging.info(f"Starting processing for file: {input_file}")
         try:
             folder_name = os.path.basename(os.path.dirname(input_file))
-            
-            # Determine the table name based on the folder name
-            try:
+            try: # Determine the table name based on the folder name
                 table_name = get_table_name_from_folder(folder_name)
                 logging.info(f"Table name for file '{input_file}' determined: {table_name}")
             except ValueError as e:
                 logging.error(f"Error determining table name for file '{input_file}': {str(e)}")
                 continue  # Skip the file if folder name is not recognized
             
-            # Process the file
-            if os.path.exists(input_file):
+            if os.path.exists(input_file):             # Process the file
                 logging.info(f"File found: {input_file}")
                 with open(input_file, 'r') as infile:
                     lines = infile.readlines()
                     logging.info(f"Read {len(lines)} lines from the file: {input_file}")
                 
-                # Read last processed line for this specific file
-                last_line = read_last_processed_line(input_file, last_lines)
+                
+                last_line = read_last_processed_line(input_file, last_lines) # Read last processed line for this specific file
+                etl_log_id = read_etl_log_id(etl_log_file) # Read current etl_log_idn
 
-                # Read current etl_log_id and increment it after the run
-                etl_log_id = read_etl_log_id(etl_log_file)
-
-                # Process the .dat file and convert to DataFrame
-                df, last_processed_line, station_name = process_data_file(lines, last_line, etl_log_id, table_name)
+                df, last_processed_line, station_name = process_data_file(lines, last_line, etl_log_id, table_name)  # Process the .dat file and convert to DataFrame
 
                 if not df.empty and upload_to_database(df, table_name):
-                    # Update last processed line in memory
-                    update_last_processed_line(input_file, last_processed_line, last_lines)
+                    update_last_processed_line(input_file, last_processed_line, last_lines) # Update last processed line in memory
                     logging.info(f"Successfully processed and uploaded data from: {input_file}")
 
-                # Increment etl_log_id for the next run and save it
-                etl_log_id += 1
+                etl_log_id += 1 # Increment etl_log_id for the next run and save it
                 save_etl_log_id(etl_log_file, etl_log_id)
             else:
                 logging.error(f"File not found: {input_file}")
@@ -215,17 +210,14 @@ def extract_columns_and_metadata(lines, last_line_processed):
     test_file_name = None
     found_test_file = False
 
-    # Start from the last processed line
     try:
-        for i in range(last_line_processed, len(lines)):
+        for i in range(last_line_processed, len(lines)): # Start from the last processed line
             line = lines[i].strip()
 
-            if "Data Header:" in line:
-                # Extract the timestamp from the latest Data Header
+            if "Data Header:" in line: # Extract the timestamp from the latest Data Header
                 parts = line.split("\t")
                 if len(parts) > 4:
-                    timestamp_from_file = parts[-1].strip()
-                    # Convert to SQL format
+                    timestamp_from_file = parts[-1].strip() # Convert to SQL format
                     parsed_timestamp = datetime.strptime(timestamp_from_file, "%m/%d/%Y %I:%M:%S %p")
                     header_tstamp_first = parsed_timestamp.strftime("%Y-%m-%d %H:%M:%S")
 
@@ -236,10 +228,9 @@ def extract_columns_and_metadata(lines, last_line_processed):
                 found_test_file = True  # After this, we expect the headers to be in the next line
                 continue
 
-            # If we just found the test file name, expect the next line to be the headers
             if found_test_file and not headers:
                 headers = line.split("\t")  # Use the next line as headers
-                print(f"Detected headers: {headers}")  # DEBUG
+                logging.info(f"Detected headers: {headers}")  
                 break  # We have found the headers, stop searching
 
         if not headers:
@@ -263,63 +254,49 @@ def process_data_file(lines, last_line_processed, etl_log_id, table_name):
     append_to_log_file(etl_log_id, header_tstamp_first, station_name, test_file_name, table_name)     # Log metadata once for the run
 
     in_data_section = False  # Track whether we are in the data section
-    data_count = 0  # Track number of data lines processed
     skip_units_row = False  # Set a flag to skip the units row
 
     for i in range(last_line_processed, len(lines)):
         line = lines[i].strip()
 
-        # Handle the most recent Data Header timestamp
-        if "Data Header:" in line:
-            # Extract the timestamp from the header
+        if "Data Header:" in line: # Handle the most recent Data Header timestamp
             parts = line.split("\t")
             if len(parts) > 4:
-                timestamp_from_file = parts[-1].strip()
-                # Convert to SQL format
+                timestamp_from_file = parts[-1].strip()             # Extract the timestamp from the header and convert to SQL format
                 parsed_timestamp = datetime.strptime(timestamp_from_file, "%m/%d/%Y %I:%M:%S %p")
                 most_recent_header_timestamp = parsed_timestamp.strftime("%Y-%m-%d %H:%M:%S")
             continue  # Continue to the next line, we're still processing metadata
 
-        # Skip metadata sections until the data section begins
         if "Station Name:" in line or "Test File Name:" in line:
             in_data_section = False  # Still in metadata
             continue
 
-        # Detect the actual header section and data following it
         if headers and not in_data_section:  # Start processing data after headers
             in_data_section = True
             skip_units_row = True  # We know the next line will be the units row, so we skip it
             continue
 
-        # Skip the units line after the headers
-        if skip_units_row:
+        if skip_units_row:         # Skip the units line after the headers - We are assuming that units is always after the headers
             skip_units_row = False  # Reset the flag after skipping
             continue
 
         if in_data_section:
             columns = line.split("\t")  # Split using tab between columns
 
-            # Ensure the number of columns matches the headers before adding the extra columns
-            if len(columns) == len(headers):
+            if len(columns) == len(headers):             # Ensure the number of columns matches the headers before adding the extra columns
                 try:
-                    # Convert the data to appropriate types (assuming floats for simplicity)
-                    row_data = [float(c) for c in columns]
+                    row_data = [float(c) for c in columns] # Convert the data to appropriate types - assuming they are of type floats
                     
-                    # Insert etl_log_id and header_timestamp at the right positions
                     row_data.insert(0, etl_log_id)  # Insert etl_log_id as first column
                     row_data.insert(1, most_recent_header_timestamp)  # Insert most recent header timestamp as second column
-                    row_data.insert(2, station_name)
+                    row_data.insert(2, station_name)     
                     
                     data.append(row_data)
-                    data_count += 1  # Increment the number of data lines processed
                 except ValueError as ve:
                     logging.error(f"Skipping line {i + 1} due to ValueError: {ve}")
     
     headers = ['etl_log_id', 'header_timestamp', 'station_name'] + headers      # Add 3 extra headers for the new columns: etl_log_id, header_timestamp
-
     df = pd.DataFrame(data, columns=headers)
-
-    print(f"Total rows processed: {len(df)}")
 
     return df, len(lines), station_name
 
@@ -327,8 +304,7 @@ def process_data_file(lines, last_line_processed, etl_log_id, table_name):
 def create_table_if_not_exists(engine, table_name, df):
     metadata = MetaData()
 
-    # Define dynamic columns based on DataFrame
-    columns = [Column('id', BigInteger, primary_key=True)]
+    columns = [Column('id', BigInteger, primary_key=True)] # Define dynamic columns based on DataFrame
     for col in df.columns:
         if col not in ['id']:
             if col == "header_timestamp":
@@ -341,24 +317,21 @@ def create_table_if_not_exists(engine, table_name, df):
                 columns.append(Column(col, Float))  # Assume float for other columns
 
     try:
-        # Step 1: Create the table if it does not exist
-        table = Table(table_name, metadata, *columns)
+        table = Table(table_name, metadata, *columns) # Step 1: Create the table if it does not exist
         metadata.create_all(engine)
 
-        # Hardcoded start values for sequences
-        start_values = {
+        start_values = { # Hardcoded start values for sequences
             'table_top': 1,
-            'rotary': 2 * 10**18,
-            'mts_810': 3 * 10**18,
-            'placeholder': 4 * 10**18
+            'rotary': 2 * 10**18, # 2 quintillion
+            'mts_810': 3 * 10**18, # 3 quintillion
+            'placeholder': 4 * 10**18 # 4 quintillion
         }
 
         start_value = start_values.get(table_name, 1)
         sequence_name = f"{table_name}_id_seq"
 
         with engine.connect() as conn:
-            # Check if sequence exists
-            sequence_check_query = f"SELECT 1 FROM pg_class WHERE relname = '{sequence_name}' AND relkind = 'S'"
+            sequence_check_query = f"SELECT 1 FROM pg_class WHERE relname = '{sequence_name}' AND relkind = 'S'" # Check if sequence exists
             sequence_exists = conn.execute(text(sequence_check_query)).fetchone()
 
             if not sequence_exists:
@@ -367,11 +340,9 @@ def create_table_if_not_exists(engine, table_name, df):
             else:
                 logging.info(f"Sequence {sequence_name} already exists, not restarting.")
 
-            # Commit to persist the changes
             conn.commit()
 
-            # Attach the sequence to the id column, but only if it's not already attached
-            try:
+            try:  # Attach the sequence to the id column, but only if it's not already attached
                 conn.execute(text(f"ALTER TABLE \"{table_name}\" ALTER COLUMN id SET DEFAULT nextval('{sequence_name}');"))
             except Exception as e:
                 logging.error(f"Error attaching sequence to id column for {table_name}: {str(e)}")
@@ -400,8 +371,7 @@ def upload_to_database(df, table_name):
         engine = create_engine(f'postgresql+psycopg2://{db_username}:{db_password}@{db_host}:{db_port}/{db_name}')
         
         if create_table_if_not_exists(engine, table_name, df):
-            # Drop 'id' from the DataFrame to prevent it from interfering with autoincrement in the DB
-            df = df.drop(columns=['id'], errors='ignore')
+            df = df.drop(columns=['id'], errors='ignore') # Drop 'id' from the DataFrame to prevent it from interfering with autoincrement in the DB if it's in there
             
             logging.info(f"Inserting data into the table {table_name} in chunks.")
             df.to_sql(table_name, engine, if_exists='append', index=False, chunksize=10000, dtype={
@@ -428,14 +398,46 @@ if __name__ == "__main__":
         r'C:\MTS 793\Projects\Project1\Current\temp'
     ]
 
-    mod_log_file = 'file_mod_times.txt'
-    last_lines = load_last_processed_lines() # Load the last processed lines from the file
-    
-    modified_files = track_modified_files(mod_log_file, directories) # Get the list of modified files so we know which ones to update
+    mod_log_file = 'mod_times.txt'
+    last_lines_file = 'last_lines.txt'
 
-    if modified_files:
-        logging.info(f"Modified files detected: {modified_files}")
-        process_and_upload_files(modified_files, last_lines)  # Process each modified file and track last processed lines
-        save_last_processed_lines(last_lines)     # Save the updated last processed lines to the file
+    # Check if it's the first run
+    if not os.path.exists(mod_log_file) or not os.path.exists(last_lines_file):
+        logging.info("First run detected. Initializing file modification times and last_lines.txt.")
+        
+        last_lines = {}
+        last_mod_times = {}
+
+        # Populate both files with current data
+        for directory in directories:
+            if os.path.exists(directory):
+                for filename in os.listdir(directory):
+                    file_path = os.path.join(directory, filename)
+                    if os.path.isfile(file_path):
+                        # Get the current last line number and modification time
+                        last_lines[file_path] = get_last_line_of_file(file_path)
+                        last_mod_times[file_path] = os.path.getmtime(file_path)
+
+        # Save the last lines to last_lines.txt
+        with open(last_lines_file, 'w') as f:
+            for file_path, last_line in last_lines.items():
+                f.write(f"{file_path}\t{last_line}\n")
+
+        # Save the modification times to mod_times.txt
+        with open(mod_log_file, 'w') as f:
+            for file_path, mod_time in last_mod_times.items():
+                f.write(f"{file_path}\t{mod_time}\n")
+
+        logging.info("Initialization complete. No processing needed on the first run.")
+    
     else:
-        logging.info("No modified files found in any of the folders.")
+        # Not the first run: proceed with normal processing
+        last_lines = load_last_processed_lines()
+        modified_files = track_modified_files(mod_log_file, directories)
+
+        if modified_files:
+            logging.info(f"Modified files detected: {modified_files}")
+            process_and_upload_files(modified_files, last_lines)
+            save_last_processed_lines(last_lines)
+        else:
+            logging.info("No modified files found in any of the folders.")
