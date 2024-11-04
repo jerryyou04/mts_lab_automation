@@ -1,3 +1,10 @@
+############################################################# 
+'''
+Version: 2
+ 
+see below for version info.
+'''
+#############################################################
 import pandas as pd
 import os
 import traceback
@@ -7,62 +14,165 @@ from sqlalchemy.sql import text
 from datetime import datetime
 from dotenv import load_dotenv
 
+############################################################# logging
 def setup_logging():
-    # Get the current month and year
-    current_month_year = datetime.now().strftime("%Y_%m")
-    log_filename = f"etl_error_log_{current_month_year}.txt"  # Filename based on the current year and month
+    log_directory = "C:/data/script/system_data"
 
-    # Configure logging to log to the specified file and include time, error level, and message
-    logging.basicConfig(
-        filename=log_filename,
+    # Create the directory if not exists
+    if not os.path.exists(log_directory):
+        os.makedirs(log_directory)
+        logging.info(f"Created log directory: {log_directory}")
+
+    current_month_year = datetime.now().strftime("%Y_%m")
+    log_filename = os.path.join(log_directory, f"etl_error_log_{current_month_year}.txt")
+
+    logging.basicConfig(     # Configure logging to log to the specified file and include time, error level, and message
         level=logging.DEBUG,  
         format='%(asctime)s\t%(levelname)s\t%(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S'
+        datefmt='%Y-%m-%d %H:%M:%S',
+        handlers=[
+            logging.FileHandler(log_filename),  # Log to a file
+            logging.StreamHandler()  # Also print to console
+        ]
     )
+###################################################################### Setup and global variables
+load_dotenv() 
+setup_logging() 
 
+file_mod_times = {}  
+########################################################## File modification times in OS
+# Load modification times from a text file
+def load_modification_times():
+    global file_mod_times
+    file_mod_times = {}
     
-def initialize_metadata(etl_log_id, header_tstamp_first, station_name, test_file_name, table_name):
-    global etl_metadata
-    etl_metadata['etl_log_id'] = etl_log_id
-    etl_metadata['header_tstamp_first'] = header_tstamp_first
-    etl_metadata['station_name'] = station_name
-    etl_metadata['test_file_name'] = test_file_name
-    etl_metadata['table_name'] = table_name
-
-load_dotenv()
-
-# Call the setup_logging function to configure logging when the script starts
-setup_logging()
-
-etl_metadata = {
-    'etl_log_id': 'N/A',
-    'header_tstamp_first': 'N/A',
-    'station_name': 'N/A',
-    'test_file_name': 'N/A',
-    'table_name': 'N/A'
-}
-
-
-
-# Function to read the last processed line from last_line.txt
-def read_last_processed_line(filepath):
-    if os.path.exists(filepath):
-        try:
-            with open(filepath, 'r') as f:
-                return int(f.read().strip())
-        except ValueError:
-            logging.warning(f"Warning: Could not read an integer from {filepath}. Defaulting to 0.")
-            return 0
+    if os.path.exists('mod_times.txt'):
+        with open('mod_times.txt', 'r') as f:
+            for line in f:
+                file_path, mod_time = line.strip().split("\t")
+                file_mod_times[file_path] = float(mod_time)
+        logging.info("Loaded previous file modification times.")
     else:
-        logging.error(f"No file found at {filepath}")  # Log the error
-        raise FileNotFoundError(f"{filepath} is missing. Please create or provide the file.")
+        logging.info("No previous modification times found, starting fresh.")
 
-# Function to save the last processed line to a text file
-def save_last_processed_line(filepath, line_num):
-    with open(filepath, 'w') as f:
-        f.write(str(line_num))
 
-# Function to read and increment the etl_log_id from a text file
+# Save modification times to a text file
+def save_modification_times():
+    with open('mod_times.txt', 'w') as f:
+        for file_path, mod_time in file_mod_times.items():
+            f.write(f"{file_path}\t{mod_time}\n")
+    logging.info("File modification times saved.")
+
+def get_last_modification_time(file_path):
+    return os.path.getmtime(file_path)
+
+def track_modified_files(log_file, directories):
+    modified_files = []
+    valid_directories = 0  # Track how many valid directories are found
+
+    last_mod_times = {} # Read the last recorded file mod times
+    if os.path.exists(log_file):
+        with open(log_file, 'r') as f:
+            for line in f:
+                filepath, last_mod_time = line.strip().split("\t")
+                last_mod_times[filepath] = float(last_mod_time)
+    
+    # Check each directory for modified files
+    for directory in directories:
+        if os.path.exists(directory):  # Only process the directory if it exists
+            valid_directories += 1  # Count how many directories exist
+            for filename in os.listdir(directory):
+                file_path = os.path.join(directory, filename)
+                if os.path.isfile(file_path):
+                    current_mod_time = os.path.getmtime(file_path)
+
+                    # Check if it's a new or modified file
+                    if file_path not in last_mod_times or current_mod_time > last_mod_times[file_path]:
+                        modified_files.append(file_path)
+                        last_mod_times[file_path] = current_mod_time
+        else:
+            logging.warning(f"Directory does not exist: {directory}")
+
+    # Raise an error if no valid directories were found
+    if valid_directories == 0:
+        logging.critical("No valid directories found. Ensure that at least one folder exists.")
+        raise FileNotFoundError("All specified directories are missing.")
+
+    # Write updated mod times back to the log file
+    with open(log_file, 'w') as f:
+        for filepath, mod_time in last_mod_times.items():
+            f.write(f"{filepath}\t{mod_time}\n")
+    
+    return modified_files
+
+def get_last_line_of_file(file_path): # helper to find the last line of a file.
+    with open(file_path, 'r') as f:
+        return sum(1 for _ in f)
+
+########################################################################################## Process each file in a loop
+# Process each modified file 
+def process_and_upload_files(modified_files, last_lines):
+    etl_log_file = 'etl_log_id.txt'  # Hardcoded the log file path
+    for input_file in modified_files:
+        logging.info(f"Starting processing for file: {input_file}")
+        try:
+            folder_name = os.path.basename(os.path.dirname(input_file))
+            try: # Determine the table name based on the folder name
+                table_name = get_table_name_from_folder(folder_name)
+                logging.info(f"Table name for file '{input_file}' determined: {table_name}")
+            except ValueError as e:
+                logging.error(f"Error determining table name for file '{input_file}': {str(e)}")
+                continue  # Skip the file if folder name is not recognized
+            
+            if os.path.exists(input_file):             # Process the file
+                logging.info(f"File found: {input_file}")
+                with open(input_file, 'r') as infile:
+                    lines = infile.readlines()
+                    logging.info(f"Read {len(lines)} lines from the file: {input_file}")
+                
+                
+                last_line = read_last_processed_line(input_file, last_lines) # Read last processed line for this specific file
+                etl_log_id = read_etl_log_id(etl_log_file) # Read current etl_log_idn
+
+                df, last_processed_line, station_name = process_data_file(lines, last_line, etl_log_id, table_name)  # Process the .dat file and convert to DataFrame
+
+                if not df.empty and upload_to_database(df, table_name):
+                    update_last_processed_line(input_file, last_processed_line, last_lines) # Update last processed line in memory
+                    logging.info(f"Successfully processed and uploaded data from: {input_file}")
+
+                etl_log_id += 1 # Increment etl_log_id for the next run and save it
+                save_etl_log_id(etl_log_file, etl_log_id)
+            else:
+                logging.error(f"File not found: {input_file}")
+        except Exception as e:
+            logging.error(f"Error processing {input_file}: {str(e)}")
+        logging.info(f"Finished processing file: {input_file}")
+######################################################################## Last line and logging
+def load_last_processed_lines(tsv_file='last_lines.txt'): #retrieves
+    last_lines = {}
+    if os.path.exists(tsv_file):
+        with open(tsv_file, 'r') as f:
+            for line in f:
+                filename, last_line = line.strip().split('\t')
+                last_lines[filename] = int(last_line)
+    return last_lines
+
+# Function to save the last processed lines to a tsv file
+def save_last_processed_lines(last_lines, tsv_file='last_lines.txt'):
+    with open(tsv_file, 'w') as f:
+        for filename, last_line in last_lines.items():
+            f.write(f"{filename}\t{last_line}\n")
+
+# Function to read the last processed line for a specific file
+def read_last_processed_line(input_file, last_lines):
+    if input_file in last_lines:
+        return last_lines[input_file]
+    else:
+        return 0  # Default to 0 if the file hasn't been processed before
+
+def update_last_processed_line(input_file, last_line, last_lines):
+    last_lines[input_file] = last_line
+
 def read_etl_log_id(log_file):
     if os.path.exists(log_file):
         with open(log_file, 'r') as f:
@@ -75,21 +185,22 @@ def save_etl_log_id(log_file, etl_log_id):
         f.write(str(etl_log_id))
 
 def append_to_log_file(etl_log_id, header_tstamp_first, station_name, test_file_name, table_name):
-    # Get the current month and year
     current_month_year = datetime.now().strftime("%Y_%m")
-    log_filename = f"etl_log_{current_month_year}.txt"  # Filename based on the current year and month
+    log_directory = "C:/data/script/system_data"  
+
+    if not os.path.exists(log_directory):
+        os.makedirs(log_directory)
+
+    log_filename = os.path.join(log_directory, f"etl_log_{current_month_year}.txt")
 
     # Check if the file exists
     file_exists = os.path.exists(log_filename)
 
-    # Open the log file in append mode
     with open(log_filename, 'a') as log_file:
-        # If the file doesn't exist, write the TSV header
-        if not file_exists:
+        if not file_exists: # If the file doesn't exist, write the TSV header
             log_file.write("id\tbegan_at_timestamp\theader_tstamp_first\tstation_name\ttest_file_name\ttable_name\n")
-        
-        # Append the log entry in TSV format, including the table_name
-        timestamp_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        timestamp_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")         # Append the log entry in TSV format, including the table_name
         log_file.write(f"{etl_log_id}\t{timestamp_now}\t{header_tstamp_first}\t{station_name}\t{test_file_name}\t{table_name}\n")
 
 # Function to determine the table name based on the folder name (last part of the folder)
@@ -107,7 +218,10 @@ def get_table_name_from_folder(folder_name):
         logging.error(error_message)
         raise ValueError(error_message)
 
-# Function to extract column names and metadata from the file
+#########################################################################
+
+######################################################################### SQL functions
+
 def extract_columns_and_metadata(lines, last_line_processed):
     headers = []
     header_tstamp_first = None
@@ -115,17 +229,14 @@ def extract_columns_and_metadata(lines, last_line_processed):
     test_file_name = None
     found_test_file = False
 
-    # Start from the last processed line
     try:
-        for i in range(last_line_processed, len(lines)):
+        for i in range(last_line_processed, len(lines)): # Start from the last processed line
             line = lines[i].strip()
 
-            if "Data Header:" in line:
-                # Extract the timestamp from the latest Data Header
+            if "Data Header:" in line: # Extract the timestamp from the latest Data Header
                 parts = line.split("\t")
                 if len(parts) > 4:
-                    timestamp_from_file = parts[-1].strip()
-                    # Convert to SQL format
+                    timestamp_from_file = parts[-1].strip() # Convert to SQL format
                     parsed_timestamp = datetime.strptime(timestamp_from_file, "%m/%d/%Y %I:%M:%S %p")
                     header_tstamp_first = parsed_timestamp.strftime("%Y-%m-%d %H:%M:%S")
 
@@ -136,10 +247,9 @@ def extract_columns_and_metadata(lines, last_line_processed):
                 found_test_file = True  # After this, we expect the headers to be in the next line
                 continue
 
-            # If we just found the test file name, expect the next line to be the headers
             if found_test_file and not headers:
                 headers = line.split("\t")  # Use the next line as headers
-                print(f"Detected headers: {headers}")  # DEBUG
+                logging.info(f"Detected headers: {headers}")  
                 break  # We have found the headers, stop searching
 
         if not headers:
@@ -154,140 +264,119 @@ def process_data_file(lines, last_line_processed, etl_log_id, table_name):
     data = []
     most_recent_header_timestamp = None  # Track the most recent timestamp
     
-    print(f"Successfully read {len(lines)} lines from the file.")
-    
-    # Extract headers and metadata
     headers, header_tstamp_first, station_name, test_file_name = extract_columns_and_metadata(lines, last_line_processed)
 
     if not headers:
         logging.error("No headers found in the file. (end of file?)")
         return pd.DataFrame(), last_line_processed, station_name
 
-    initialize_metadata(etl_log_id, header_tstamp_first, station_name, test_file_name, table_name)
-
-    # Log metadata once for the run
-    append_to_log_file(etl_log_id, header_tstamp_first, station_name, test_file_name, table_name)
+    append_to_log_file(etl_log_id, header_tstamp_first, station_name, test_file_name, table_name)     # Log metadata once for the run
 
     in_data_section = False  # Track whether we are in the data section
-    data_count = 0  # Track number of data lines processed
     skip_units_row = False  # Set a flag to skip the units row
 
     for i in range(last_line_processed, len(lines)):
         line = lines[i].strip()
 
-        # Handle the most recent Data Header timestamp
-        if "Data Header:" in line:
-            # Extract the timestamp from the header
+        if "Data Header:" in line: # Handle the most recent Data Header timestamp
             parts = line.split("\t")
             if len(parts) > 4:
-                timestamp_from_file = parts[-1].strip()
-                # Convert to SQL format
+                timestamp_from_file = parts[-1].strip()             # Extract the timestamp from the header and convert to SQL format
                 parsed_timestamp = datetime.strptime(timestamp_from_file, "%m/%d/%Y %I:%M:%S %p")
                 most_recent_header_timestamp = parsed_timestamp.strftime("%Y-%m-%d %H:%M:%S")
             continue  # Continue to the next line, we're still processing metadata
 
-        # Skip metadata sections until the data section begins
         if "Station Name:" in line or "Test File Name:" in line:
             in_data_section = False  # Still in metadata
             continue
 
-        # Detect the actual header section and data following it
         if headers and not in_data_section:  # Start processing data after headers
             in_data_section = True
             skip_units_row = True  # We know the next line will be the units row, so we skip it
             continue
 
-        # Skip the units line after the headers
-        if skip_units_row:
+        if skip_units_row:         # Skip the units line after the headers - We are assuming that units is always after the headers
             skip_units_row = False  # Reset the flag after skipping
             continue
 
         if in_data_section:
             columns = line.split("\t")  # Split using tab between columns
 
-            # Ensure the number of columns matches the headers before adding the extra columns
-            if len(columns) == len(headers):
+            if len(columns) == len(headers):             # Ensure the number of columns matches the headers before adding the extra columns
                 try:
-                    # Convert the data to appropriate types (assuming floats for simplicity)
-                    row_data = [float(c) for c in columns]
+                    row_data = [float(c) for c in columns] # Convert the data to appropriate types - assuming they are of type floats
                     
-                    # Insert etl_log_id and header_timestamp at the right positions
                     row_data.insert(0, etl_log_id)  # Insert etl_log_id as first column
                     row_data.insert(1, most_recent_header_timestamp)  # Insert most recent header timestamp as second column
-                    row_data.insert(2, station_name)
+                    row_data.insert(2, station_name)     
                     
                     data.append(row_data)
-                    data_count += 1  # Increment the number of data lines processed
                 except ValueError as ve:
                     logging.error(f"Skipping line {i + 1} due to ValueError: {ve}")
     
-    # Add 3 extra headers for the new columns: etl_log_id, header_timestamp
-    headers = ['etl_log_id', 'header_timestamp', 'station_name'] + headers  
-
-    # Create DataFrame and return it
+    headers = ['etl_log_id', 'header_timestamp', 'station_name'] + headers      # Add 3 extra headers for the new columns: etl_log_id, header_timestamp
     df = pd.DataFrame(data, columns=headers)
 
-    print(f"Total rows processed: {len(df)}")
-
     return df, len(lines), station_name
+
 
 def create_table_if_not_exists(engine, table_name, df):
     metadata = MetaData()
 
-    # Define dynamic columns based on DataFrame
-    columns = [Column('id', BigInteger, primary_key=True)]
+    columns = [Column('id', BigInteger, primary_key=True)] # Define dynamic columns based on DataFrame
     for col in df.columns:
         if col not in ['id']:
             if col == "header_timestamp":
                 columns.append(Column(col, TIMESTAMP))
             elif col == "etl_log_id":
-                columns.append(Column(col, Integer))
+                columns.append(Column(col, BigInteger))
             elif col == "station_name":
                 columns.append(Column(col, String))
             else:
                 columns.append(Column(col, Float))  # Assume float for other columns
+
+    try:
+        table = Table(table_name, metadata, *columns) # Step 1: Create the table if it does not exist
+        metadata.create_all(engine)
+
+        start_values = { # Hardcoded start values for sequences
+            'table_top': 1,
+            'rotary': 2 * 10**18, # 2 quintillion
+            'mts_810': 3 * 10**18, # 3 quintillion
+            'placeholder': 4 * 10**18 # 4 quintillion
+        }
+
+        start_value = start_values.get(table_name, 1)
+        sequence_name = f"{table_name}_id_seq"
+
+        with engine.connect() as conn:
+            sequence_check_query = f"SELECT 1 FROM pg_class WHERE relname = '{sequence_name}' AND relkind = 'S'" # Check if sequence exists
+            sequence_exists = conn.execute(text(sequence_check_query)).fetchone()
+
+            if not sequence_exists:
+                logging.info(f"Creating sequence: {sequence_name}")
+                conn.execute(text(f"CREATE SEQUENCE {sequence_name} START WITH {start_value};"))
+            else:
+                logging.info(f"Sequence {sequence_name} already exists, not restarting.")
+
+            conn.commit()
+
+            try:  # Attach the sequence to the id column, but only if it's not already attached
+                conn.execute(text(f"ALTER TABLE \"{table_name}\" ALTER COLUMN id SET DEFAULT nextval('{sequence_name}');"))
+            except Exception as e:
+                logging.error(f"Error attaching sequence to id column for {table_name}: {str(e)}")
+
+        logging.info(f"Table '{table_name}' is ready.")
     
-    # Step 1: Create the table if it does not exist
-    table = Table(table_name, metadata, *columns)
-    metadata.create_all(engine)
+    except Exception as e:
+        logging.error(f"Error creating table '{table_name}': {str(e)}")
+        return False
 
-    # Hardcoded start values for sequences
-    start_values = {
-        'table_top': 1,
-        'rotary': 2 * 10**18,
-        'mts_810': 3 * 10**18,
-        'placeholder': 4 * 10**18
-    }
+    return True
 
-    start_value = start_values.get(table_name, 1)
-    sequence_name = f"{table_name}_id_seq"
-
-    with engine.connect() as conn:
-        # Check if sequence exists
-        sequence_check_query = f"SELECT 1 FROM pg_class WHERE relname = '{sequence_name}' AND relkind = 'S'"
-        sequence_exists = conn.execute(text(sequence_check_query)).fetchone()
-
-        if not sequence_exists:
-            print(f"Creating sequence: {sequence_name}")
-            conn.execute(text(f"CREATE SEQUENCE {sequence_name} START WITH {start_value};"))
-        else:
-            print(f"Sequence {sequence_name} already exists, not restarting.")
-
-        # Commit to persist the changes
-        conn.commit()
-
-        # Attach the sequence to the id column, but only if it's not already attached
-        try:
-            conn.execute(text(f"ALTER TABLE \"{table_name}\" ALTER COLUMN id SET DEFAULT nextval('{sequence_name}');"))
-        except Exception as e:
-            print(f"Error attaching sequence to id column: {e}")
-
-    print(f"Table '{table_name}' is ready.")
-
-# Function to upload data to the PostgreSQL database using SQLAlchemy
 def upload_to_database(df, table_name):
     if df.empty:
-        print("No data to upload.")
+        logging.info("No data to upload.")
         return False
 
     try:
@@ -297,72 +386,88 @@ def upload_to_database(df, table_name):
         db_port = os.getenv('DB_PORT')
         db_name = os.getenv('DB_NAME')
 
-        print(f"Attempting to connect to the database and upload to table: {table_name}...")
+        logging.info(f"Connecting to the database for table: {table_name}")
         engine = create_engine(f'postgresql+psycopg2://{db_username}:{db_password}@{db_host}:{db_port}/{db_name}')
-        print("Successfully connected to the database.")
-
-        # Drop 'id' from the DataFrame to prevent it from interfering with autoincrement in the DB
-        df = df.drop(columns=['id'], errors='ignore')
         
-        # Create table using MetaData and Table
-        create_table_if_not_exists(engine, table_name, df)
-
-        print(f"Inserting data into the table {table_name}...")
-        df.to_sql(table_name, engine, if_exists='append', index=False, chunksize = 10000, dtype={'etl_log_id': Integer(), 'header_timestamp': TIMESTAMP()})
-        print(f"Inserted {len(df)} rows into the {table_name} table.")
-        return True
+        if create_table_if_not_exists(engine, table_name, df):
+            df = df.drop(columns=['id'], errors='ignore') # Drop 'id' from the DataFrame to prevent it from interfering with autoincrement in the DB if it's in there
+            
+            logging.info(f"Inserting data into the table {table_name} in chunks.")
+            df.to_sql(table_name, engine, if_exists='append', index=False, chunksize=10000, dtype={
+                'etl_log_id': BigInteger(), 
+                'header_timestamp': TIMESTAMP(),
+                'station_name': String()
+            })
+            logging.info(f"Successfully inserted {len(df)} rows into {table_name}.")
+            return True
+        else:
+            logging.error(f"Failed to create table '{table_name}' or it already exists.")
+            return False
 
     except Exception as e:
-        print(f"An error occurred during database interaction: {e}")
-        logging.error(f"An error occurred during database interaction: {e}")
+        logging.error(f"An error occurred during database interaction: {str(e)}")
         return False
 
+############################################################################################
 if __name__ == "__main__":
-    # input_file = r'C:\MTS 793\Projects\Project1\Current\Table Top\input_data.dat' 
-    input_file = r'C:\MTS 793\Projects\Project1\Current\T24-64\ab1v  rt5 input carrier 2006 nm oct 16 2024.dat'
-    # input_file = r'C:\MTS 793\Projects\Project1\Current\MTS 810\t24-62 10 shaft torque fatigue test t2.dat'
-    # input_file = r'C:\MTS 793\Projects\Project1\Current\temp\temp.dat'
+    directories = [
+        os.getenv('DIRECTORY_1'),
+        os.getenv('DIRECTORY_2'),
+        os.getenv('DIRECTORY_3'),
+        os.getenv('DIRECTORY_4')
+    ]
 
-    last_line_file = 'last_line.txt'
-    etl_log_file = 'etl_log_id.txt'
+    mod_log_file = 'mod_times.txt'
+    last_lines_file = 'last_lines.txt'
 
-    folder_name = os.path.basename(os.path.dirname(input_file))
+    # Check if it's the first run
+    if not os.path.exists(mod_log_file) or not os.path.exists(last_lines_file):
+        logging.info("First run detected. Initializing file modification times and last_lines.txt.")
+        
+        last_lines = {}
+        last_mod_times = {}
+
+        # Populate both files with current data
+        for directory in directories:
+            if os.path.exists(directory):
+                for filename in os.listdir(directory):
+                    file_path = os.path.join(directory, filename)
+                    if os.path.isfile(file_path):
+                        # Get the current last line number and modification time
+                        last_lines[file_path] = get_last_line_of_file(file_path)
+                        last_mod_times[file_path] = os.path.getmtime(file_path)
+
+        # Save the last lines to last_lines.txt
+        with open(last_lines_file, 'w') as f:
+            for file_path, last_line in last_lines.items():
+                f.write(f"{file_path}\t{last_line}\n")
+
+        # Save the modification times to mod_times.txt
+        with open(mod_log_file, 'w') as f:
+            for file_path, mod_time in last_mod_times.items():
+                f.write(f"{file_path}\t{mod_time}\n")
+
+        logging.info("Initialization complete. No processing needed on the first run.")
     
-    # Determine the table name based on the folder name
-    try:
-        table_name = get_table_name_from_folder(folder_name)
-        print(f"Table name determined from folder: {table_name}")
-    except ValueError as e:
-        logging.critical(str(e))
-        exit(1)  # Exit if an unrecognized folder name is provided
-
-    
-    if os.path.exists(input_file):
-        print(f"File found: {input_file}")
-        # Proceed to open and read the file
-        with open(input_file, 'r') as infile:
-            lines = infile.readlines()
-            print(f"Read {len(lines)} lines from the file.")
     else:
-        logging.error(f"File not found: {input_file}")
-        exit(1)
+        # Not the first run: proceed with normal processing
+        last_lines = load_last_processed_lines()
+        modified_files = track_modified_files(mod_log_file, directories)
 
-    # Read last processed line
-    last_line = read_last_processed_line(last_line_file)
+        if modified_files:
+            logging.info(f"Modified files detected: {modified_files}")
+            process_and_upload_files(modified_files, last_lines)
+            save_last_processed_lines(last_lines)
+        else:
+            logging.info("No modified files found in any of the folders.")
+############################################################# 
+'''
+Versions
+ 
+1 2024-10-25 initial version
 
-    # Read current etl_log_id and increment it after the run
-    etl_log_id = read_etl_log_id(etl_log_file)
-
-    # Read the file contents once and reuse it
-    with open(input_file, 'r') as infile:
-        lines = infile.readlines()
-
-    # Process the .dat file and convert to DataFrame
-    df, last_processed_line, station_name = process_data_file(lines, last_line, etl_log_id, table_name)
-
-    if not df.empty and upload_to_database(df, table_name):  
-        save_last_processed_line(last_line_file, last_processed_line) # Only update last_line.txt if data was successfully inserted into the database
-
-    # Increment etl_log_id for the next run and save it
-    etl_log_id += 1
-    save_etl_log_id(etl_log_file, etl_log_id)
+2 2024-11-04 relocated log files to C:/data/script/system_data
+ 
+'''
+#############################################################
+    
