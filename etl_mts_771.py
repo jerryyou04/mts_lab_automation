@@ -1,6 +1,6 @@
 ############################################################# 
 '''
-Version: 2
+Version: 3
  
 see below for version info.
 '''
@@ -9,12 +9,44 @@ import pandas as pd
 import os
 import traceback
 import logging
-from sqlalchemy import create_engine, Integer, TIMESTAMP, MetaData, Table, Column, Float, String, BigInteger
+from sqlalchemy import create_engine, Integer, TIMESTAMP, MetaData, Table, Column, Float, String, BigInteger, insert
 from sqlalchemy.sql import text
 from datetime import datetime
 from dotenv import load_dotenv
 
+###################################################################### Setup and global variables
+load_dotenv() 
+db_username = os.getenv('DB_USERNAME')
+db_password = os.getenv('DB_PASSWORD')
+db_host = os.getenv('DB_HOST')
+db_port = os.getenv('DB_PORT')
+db_name = os.getenv('DB_NAME')
+engine = create_engine(f'postgresql+psycopg2://{db_username}:{db_password}@{db_host}:{db_port}/{db_name}')
+
+etl_log_table = None
+error_log_table = None
+
+file_mod_times = {}  
+
 ############################################################# logging
+
+class DatabaseLogHandler(logging.Handler):
+    def __init__(self):
+        super().__init__()
+
+    def emit(self, record):
+        # Prepare the log entry for the database
+        log_entry = {
+            'timestamp': datetime.fromtimestamp(record.created).strftime('%Y-%m-%d %H:%M:%S'),
+            'level': record.levelname,
+            'message': record.getMessage(),
+        }
+
+        # Insert the log entry into the database
+        with engine.connect() as conn:
+            conn.execute(insert(error_log_table).values(log_entry))
+            conn.commit()  # Ensure the transaction is committed
+
 def setup_logging():
     log_directory = "C:/data/script/system_data"
 
@@ -32,14 +64,41 @@ def setup_logging():
         datefmt='%Y-%m-%d %H:%M:%S',
         handlers=[
             logging.FileHandler(log_filename),  # Log to a file
-            logging.StreamHandler()  # Also print to console
+            logging.StreamHandler(),  # Also print to console
+            DatabaseLogHandler() 
         ]
     )
-###################################################################### Setup and global variables
-load_dotenv() 
-setup_logging() 
 
-file_mod_times = {}  
+def create_logging_tables_if_not_exists():
+    global etl_log_table, error_log_table 
+    metadata = MetaData()
+
+    # Define schema for etl_log table
+    etl_log_table = Table(
+        'etl_log', metadata,
+        Column('id', BigInteger),
+        Column('began_at_timestamp', TIMESTAMP),
+        Column('header_tstamp_first', TIMESTAMP),
+        Column('station_name', String),
+        Column('test_file_name', String),
+        Column('table_name', String),
+        Column('rows_inserted', Integer),
+        Column('minutes_since_last_run', Integer)
+    )
+
+    # Define schema for error_log table if needed
+    error_log_table = Table(
+        'error_log', metadata,
+        Column('timestamp', TIMESTAMP),
+        Column('level', String),
+        Column('message', String),
+    )
+
+    # Create tables if they don’t exist
+    metadata.create_all(engine)
+
+########################################################## set up logging
+setup_logging() 
 ########################################################## File modification times in OS
 # Load modification times from a text file
 def load_modification_times():
@@ -198,10 +257,32 @@ def append_to_log_file(etl_log_id, header_tstamp_first, station_name, test_file_
 
     with open(log_filename, 'a') as log_file:
         if not file_exists: # If the file doesn't exist, write the TSV header
-            log_file.write("id\tbegan_at_timestamp\theader_tstamp_first\tstation_name\ttest_file_name\ttable_name\n")
+            log_file.write("id\tbegan_at_timestamp\theader_tstamp_first\tstation_name\ttest_file_name\ttable_name\trows_inserted\tminutes_since_last_run\n")
+
+        rows_inserted = "NULL"
+        minutes_since_last_run = "NULL"
 
         timestamp_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")         # Append the log entry in TSV format, including the table_name
-        log_file.write(f"{etl_log_id}\t{timestamp_now}\t{header_tstamp_first}\t{station_name}\t{test_file_name}\t{table_name}\n")
+        log_file.write(f"{etl_log_id}\t{timestamp_now}\t{header_tstamp_first}\t{station_name}\t{test_file_name}\t{table_name}\t{rows_inserted}\t{minutes_since_last_run}\n")
+
+
+    current_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S") 
+    etl_log_entry = {
+        'id': etl_log_id,  
+        'began_at_timestamp': current_timestamp,
+        'header_tstamp_first': header_tstamp_first,
+        'station_name': station_name,
+        'test_file_name': test_file_name,
+        'table_name': table_name,
+        'rows_inserted': None,
+        'minutes_since_last_run': None
+    }
+
+    # Insert the entry into the database
+    with engine.connect() as conn:
+        conn.execute(insert(etl_log_table).values(etl_log_entry))
+        conn.commit()
+        logging.info(f"Inserted log entry into etl_log with id: {etl_log_id}")
 
 # Function to determine the table name based on the folder name (last part of the folder)
 def get_table_name_from_folder(folder_name):  
@@ -249,7 +330,6 @@ def extract_columns_and_metadata(lines, last_line_processed):
 
             if found_test_file and not headers:
                 headers = line.split("\t")  # Use the next line as headers
-                logging.info(f"Detected headers: {headers}")  
                 break  # We have found the headers, stop searching
 
         if not headers:
@@ -380,14 +460,7 @@ def upload_to_database(df, table_name):
         return False
 
     try:
-        db_username = os.getenv('DB_USERNAME')
-        db_password = os.getenv('DB_PASSWORD')
-        db_host = os.getenv('DB_HOST')
-        db_port = os.getenv('DB_PORT')
-        db_name = os.getenv('DB_NAME')
-
         logging.info(f"Connecting to the database for table: {table_name}")
-        engine = create_engine(f'postgresql+psycopg2://{db_username}:{db_password}@{db_host}:{db_port}/{db_name}')
         
         if create_table_if_not_exists(engine, table_name, df):
             df = df.drop(columns=['id'], errors='ignore') # Drop 'id' from the DataFrame to prevent it from interfering with autoincrement in the DB if it's in there
@@ -417,6 +490,7 @@ if __name__ == "__main__":
         os.getenv('DIRECTORY_4')
     ]
 
+    create_logging_tables_if_not_exists()
     mod_log_file = 'mod_times.txt'
     last_lines_file = 'last_lines.txt'
 
@@ -467,6 +541,8 @@ Versions
 1 2024-10-25 initial version
 
 2 2024-11-04 relocated log files to C:/data/script/system_data
+
+3 2024-11-05 Added null columns rows_inserted and minutes_since_last_run to etl_log, and created new tables for error_log and etl_log
  
 '''
 #############################################################
