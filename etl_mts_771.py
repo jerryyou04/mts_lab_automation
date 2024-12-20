@@ -1,6 +1,6 @@
 ############################################################# 
 '''
-Version: 3
+Version: 4
  
 see below for version info.
 '''
@@ -22,6 +22,10 @@ db_host = os.getenv('DB_HOST')
 db_port = os.getenv('DB_PORT')
 db_name = os.getenv('DB_NAME')
 engine = create_engine(f'postgresql+psycopg2://{db_username}:{db_password}@{db_host}:{db_port}/{db_name}')
+
+#timescale stuff.
+timescale_db_name = 'mts771_ts' 
+timescale_engine = create_engine(f'postgresql+psycopg2://{db_username}:{db_password}@{db_host}:{db_port}/{timescale_db_name}')
 
 etl_log_table = None
 error_log_table = None
@@ -149,8 +153,6 @@ def track_modified_files(log_file, directories):
                     if file_path not in last_mod_times or current_mod_time > last_mod_times[file_path]:
                         modified_files.append(file_path)
                         last_mod_times[file_path] = current_mod_time
-        else:
-            logging.warning(f"Directory does not exist: {directory}")
 
     # Raise an error if no valid directories were found
     if valid_directories == 0:
@@ -174,15 +176,7 @@ def process_and_upload_files(modified_files, last_lines):
     etl_log_file = 'etl_log_id.txt'  # Hardcoded the log file path
     for input_file in modified_files:
         logging.info(f"Starting processing for file: {input_file}")
-        try:
-            folder_name = os.path.basename(os.path.dirname(input_file))
-            try: # Determine the table name based on the folder name
-                table_name = get_table_name_from_folder(folder_name)
-                logging.info(f"Table name for file '{input_file}' determined: {table_name}")
-            except ValueError as e:
-                logging.error(f"Error determining table name for file '{input_file}': {str(e)}")
-                continue  # Skip the file if folder name is not recognized
-            
+        try:        
             if os.path.exists(input_file):             # Process the file
                 logging.info(f"File found: {input_file}")
                 with open(input_file, 'r') as infile:
@@ -193,11 +187,15 @@ def process_and_upload_files(modified_files, last_lines):
                 last_line = read_last_processed_line(input_file, last_lines) # Read last processed line for this specific file
                 etl_log_id = read_etl_log_id(etl_log_file) # Read current etl_log_idn
 
-                df, last_processed_line, station_name = process_data_file(lines, last_line, etl_log_id, table_name)  # Process the .dat file and convert to DataFrame
+                df, last_processed_line, station_name, table_name, header_tstamp_first, test_file_name = process_data_file(lines, last_line, etl_log_id)  # Process the .dat file and convert to DataFrame
 
-                if not df.empty and upload_to_database(df, table_name):
-                    update_last_processed_line(input_file, last_processed_line, last_lines) # Update last processed line in memory
-                    logging.info(f"Successfully processed and uploaded data from: {input_file}")
+                if table_name and not df.empty:
+                    success, rows_inserted = upload_to_database(df, table_name)
+                    if success:
+                        update_last_processed_line(input_file, last_processed_line, last_lines) # Update last processed line in memory
+                        logging.info(f"Successfully processed and uploaded data from: {input_file}")
+
+                        append_to_log_file(etl_log_id, header_tstamp_first, station_name, test_file_name, table_name,rows_inserted)
 
                 etl_log_id += 1 # Increment etl_log_id for the next run and save it
                 save_etl_log_id(etl_log_file, etl_log_id)
@@ -243,7 +241,7 @@ def save_etl_log_id(log_file, etl_log_id):
     with open(log_file, 'w') as f:
         f.write(str(etl_log_id))
 
-def append_to_log_file(etl_log_id, header_tstamp_first, station_name, test_file_name, table_name):
+def append_to_log_file(etl_log_id, header_tstamp_first, station_name, test_file_name, table_name, rows_inserted):
     current_month_year = datetime.now().strftime("%Y_%m")
     log_directory = "C:/data/script/system_data"  
 
@@ -259,7 +257,6 @@ def append_to_log_file(etl_log_id, header_tstamp_first, station_name, test_file_
         if not file_exists: # If the file doesn't exist, write the TSV header
             log_file.write("id\tbegan_at_timestamp\theader_tstamp_first\tstation_name\ttest_file_name\ttable_name\trows_inserted\tminutes_since_last_run\n")
 
-        rows_inserted = "NULL"
         minutes_since_last_run = "NULL"
 
         timestamp_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")         # Append the log entry in TSV format, including the table_name
@@ -274,7 +271,7 @@ def append_to_log_file(etl_log_id, header_tstamp_first, station_name, test_file_
         'station_name': station_name,
         'test_file_name': test_file_name,
         'table_name': table_name,
-        'rows_inserted': None,
+        'rows_inserted': rows_inserted,
         'minutes_since_last_run': None
     }
 
@@ -283,21 +280,6 @@ def append_to_log_file(etl_log_id, header_tstamp_first, station_name, test_file_
         conn.execute(insert(etl_log_table).values(etl_log_entry))
         conn.commit()
         logging.info(f"Inserted log entry into etl_log with id: {etl_log_id}")
-
-# Function to determine the table name based on the folder name (last part of the folder)
-def get_table_name_from_folder(folder_name):  
-    if folder_name == "Table Top":
-        return "table_top"
-    elif folder_name == "T24-64":
-        return "rotary"
-    elif folder_name == "MTS 810":
-        return "mts_810"
-    elif folder_name == "placeholder":
-        return "placeholder"
-    else:
-        error_message = f"Unrecognized folder name: {folder_name}"
-        logging.error(error_message)
-        raise ValueError(error_message)
 
 #########################################################################
 
@@ -309,6 +291,7 @@ def extract_columns_and_metadata(lines, last_line_processed):
     station_name = None
     test_file_name = None
     found_test_file = False
+    table_name = None
 
     try:
         for i in range(last_line_processed, len(lines)): # Start from the last processed line
@@ -330,27 +313,38 @@ def extract_columns_and_metadata(lines, last_line_processed):
 
             if found_test_file and not headers:
                 headers = line.split("\t")  # Use the next line as headers
+
+                # Determine table name based on unique headers
+                if "Ch 1 Output" in headers:
+                    table_name = "table_top"
+                elif "Rotary Output" in headers:
+                    table_name = "rotary"
+                elif "Axial Output" in headers:
+                    table_name = "mts_810"
+                else:
+                    raise ValueError("Unknown table type based on headers")
+
                 break  # We have found the headers, stop searching
 
-        if not headers:
-            logging.error("No valid headers found in the file.")
+        if header_tstamp_first is None:
+            logging.warning(f"No header timestamp found for file: {test_file_name}")
+        if test_file_name is None:
+            logging.warning("Test file name is missing.")
     
     except Exception as e:
         logging.error(f"Error during metadata extraction: {e}")
     
-    return headers, header_tstamp_first, station_name, test_file_name
+    return headers, header_tstamp_first, station_name, test_file_name, table_name
 
-def process_data_file(lines, last_line_processed, etl_log_id, table_name):
+def process_data_file(lines, last_line_processed, etl_log_id):
     data = []
     most_recent_header_timestamp = None  # Track the most recent timestamp
     
-    headers, header_tstamp_first, station_name, test_file_name = extract_columns_and_metadata(lines, last_line_processed)
+    headers, header_tstamp_first, station_name, test_file_name, table_name = extract_columns_and_metadata(lines, last_line_processed)
 
-    if not headers:
-        logging.error("No headers found in the file. (end of file?)")
-        return pd.DataFrame(), last_line_processed, station_name
-
-    append_to_log_file(etl_log_id, header_tstamp_first, station_name, test_file_name, table_name)     # Log metadata once for the run
+    if not headers or not table_name:
+        logging.error(f"{table_name}: No valid headers found in the file or unknown Table Type.")
+        return pd.DataFrame(), last_line_processed, station_name, None
 
     in_data_section = False  # Track whether we are in the data section
     skip_units_row = False  # Set a flag to skip the units row
@@ -392,12 +386,12 @@ def process_data_file(lines, last_line_processed, etl_log_id, table_name):
                     
                     data.append(row_data)
                 except ValueError as ve:
-                    logging.error(f"Skipping line {i + 1} due to ValueError: {ve}")
+                    logging.error(f"{table_name}: Skipping line {i + 1} due to ValueError: {ve}")
     
     headers = ['etl_log_id', 'header_timestamp', 'station_name'] + headers      # Add 3 extra headers for the new columns: etl_log_id, header_timestamp
     df = pd.DataFrame(data, columns=headers)
 
-    return df, len(lines), station_name
+    return df, len(lines), station_name, table_name, header_tstamp_first, test_file_name
 
 
 def create_table_if_not_exists(engine, table_name, df):
@@ -454,32 +448,101 @@ def create_table_if_not_exists(engine, table_name, df):
 
     return True
 
-def upload_to_database(df, table_name):
-    if df.empty:
-        logging.info("No data to upload.")
-        return False
+##### Temporary placeholder function to insert into timescale database.
+def create_table_if_not_exists_ts(engine, table_name, df):
+    metadata = MetaData()
+
+    columns = [Column('id', BigInteger, primary_key=True)] # Define dynamic columns based on DataFrame
+    for col in df.columns:
+        if col not in ['id']:
+            if col == "header_timestamp":
+                columns.append(Column(col, TIMESTAMP))
+            elif col == "etl_log_id":
+                columns.append(Column(col, BigInteger))
+            elif col == "station_name":
+                columns.append(Column(col, String))
+            else:
+                columns.append(Column(col, Float))  # Assume float for other columns
 
     try:
-        logging.info(f"Connecting to the database for table: {table_name}")
+        table = Table(table_name, metadata, *columns) # Step 1: Create the table if it does not exist
+        metadata.create_all(engine)
+
+        start_values = { # Hardcoded start values for sequences
+            'table_top': 1,
+            'rotary': 2 * 10**18, # 2 quintillion
+            'mts_810': 3 * 10**18, # 3 quintillion
+            'placeholder': 4 * 10**18 # 4 quintillion
+        }
+
+        start_value = start_values.get(table_name, 1)
+        sequence_name = f"{table_name}_id_seq"
+
+        with engine.connect() as conn:
+            sequence_check_query = f"SELECT 1 FROM pg_class WHERE relname = '{sequence_name}' AND relkind = 'S'" # Check if sequence exists
+            sequence_exists = conn.execute(text(sequence_check_query)).fetchone()
+
+            if not sequence_exists:
+                logging.info(f"Creating sequence: {sequence_name}")
+                conn.execute(text(f"CREATE SEQUENCE {sequence_name} START WITH {start_value};"))
+            else:
+                logging.info(f"Sequence {sequence_name} already exists, not restarting.")
+
+            conn.commit()
+
+            try:  # Attach the sequence to the id column, but only if it's not already attached
+                conn.execute(text(f"ALTER TABLE \"{table_name}\" ALTER COLUMN id SET DEFAULT nextval('{sequence_name}');"))
+            except Exception as e:
+                logging.error(f"Error attaching sequence to id column for {table_name}: {str(e)}")
+
+        logging.info(f"Table '{table_name}' is ready.")
+    
+    except Exception as e:
+        logging.error(f"Error creating table '{table_name}': {str(e)}")
+        return False
+
+    return True
+
+
+
+def upload_to_database(df, table_name):
+    if df.empty:
+        logging.info(f"{table_name}: No data to upload.")
+        return False, 0
+
+    try:
+        logging.info(f"{table_name}: Connecting to the database for table.")
         
         if create_table_if_not_exists(engine, table_name, df):
             df = df.drop(columns=['id'], errors='ignore') # Drop 'id' from the DataFrame to prevent it from interfering with autoincrement in the DB if it's in there
             
-            logging.info(f"Inserting data into the table {table_name} in chunks.")
+            logging.info(f"{table_name}: Inserting data into the table in chunks.")
             df.to_sql(table_name, engine, if_exists='append', index=False, chunksize=10000, dtype={
                 'etl_log_id': BigInteger(), 
                 'header_timestamp': TIMESTAMP(),
                 'station_name': String()
             })
-            logging.info(f"Successfully inserted {len(df)} rows into {table_name}.")
-            return True
+            rows_inserted = len(df)
+            logging.info(f"{table_name}: Successfully inserted {rows_inserted} rows.")
+            
+            # Now insert into the TimescaleDB database
+
+            if create_table_if_not_exists_ts(timescale_engine, f"{table_name}_ts", df):
+                logging.info(f"Inserting data into the TimescaleDB table {table_name}_ts in chunks.")
+                df.to_sql(f"{table_name}_ts", timescale_engine, if_exists='append', index=False, chunksize=10000, dtype={
+                    'etl_log_id': BigInteger(), 
+                    'header_timestamp': TIMESTAMP(),
+                    'station_name': String()
+                })
+                logging.info(f"{table_name}_ts: Successfully inserted {rows_inserted} rows into TimescaleDB.")
+                return True, rows_inserted
         else:
-            logging.error(f"Failed to create table '{table_name}' or it already exists.")
-            return False
+            logging.error(f"{table_name}: Failed to create table or it already exists.")
+            return False, 0 
 
     except Exception as e:
-        logging.error(f"An error occurred during database interaction: {str(e)}")
-        return False
+        logging.error(f"{table_name}: An error occurred during database interaction: {str(e)[:900]}...")
+        return False, 0 
 
 ############################################################################################
 if __name__ == "__main__":
@@ -543,6 +606,15 @@ Versions
 2 2024-11-04 relocated log files to C:/data/script/system_data
 
 3 2024-11-05 Added null columns rows_inserted and minutes_since_last_run to etl_log, and created new tables for error_log and etl_log
+
+3.1 2024-11-07 Made it also insert into mts_771_ts database.
+
+3.2 2024-11-11 Included table name where applicable, and truncated long error log message bug.
+
+3.3 2024-11-13 Removed folder to table logic. Script now finds table name based off headers.
+
+4 2024-11-13 Etl_log will now display rows inserted. Removed warning for directories not existing. 
+(Also changed task scheduler to run on the hour so every 5 minute mark)
  
 '''
 #############################################################
